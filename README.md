@@ -1,4 +1,4 @@
-# promptless
+# Promptless
 
 > Your terminal shouldn't need an IDE wrapper to understand English.
 
