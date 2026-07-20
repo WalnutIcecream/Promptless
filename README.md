@@ -21,7 +21,7 @@ Your Enter key
     │
     ▼
 ┌──────────────────────────────────────┐
-│           classify_and_route()        │
+│           classify_and_route()       │
 │                                      │
 │  1. Hash lookup against $PATH cache  │  ← 95% of inputs return here, <10µs
 │  2. Shell metacharacter scan         │  ← pipes, redirects, flags → command
@@ -109,7 +109,7 @@ cd ~/project-b
 - **Bash ≥ 4.0** or **Zsh ≥ 5.8** (for associative array support)
 - `compgen` available (built into bash; zsh sources via `compgen -abk`)
 
-## Hacking
+## Adding new commands
 
 To add a new ambiguous verb, edit the `is_ambiguous_verb()` case list in `lib/classifier.sh`:
 
