@@ -1,0 +1,145 @@
+# promptless — full architecture reference
+
+## Classification pipeline (lib/classifier.sh)
+
+The classifier resolves every terminal input into one of two paths:
+native shell command, or natural-language prompt to opencode.
+
+### Hot path: $PATH cache lookup
+
+At shell startup, `build_command_cache()` populates an associative
+array `COMMAND_CACHE` from `compgen -c`. Every input's first word is
+looked up in this hash. If found *and* not on the ambiguous-verb list,
+the input is a command — the check is O(1) and completes in under 10µs.
+
+### Ambiguous verbs
+
+`is_ambiguous_verb()` lists ~200 words that exist as both Unix commands
+and English verbs ("find", "make", "test", "build", "delete", etc.).
+These bypass the hot-path shortcut and fall through to further checks.
+
+### Shell builtins
+
+A `case` pattern matches bash builtins (cd, echo, export, source, alias,
+eval, exec, exit, type, which, help, time, set, unset, shift, umask,
+enable, bind, declare, typeset, local, readonly, printf, mapfile,
+readarray, builtin, caller, command, compgen, complete, compopt, dirs,
+disown, getopts, popd, pushd, pwd, return, shopt, suspend, trap, times,
+false, ulimit, logout, continue, break). These always run as commands.
+
+### Shell metacharacter detection
+
+Inputs containing pipes (`|`), redirects (`>`, `<`), background (`&`),
+command separators (`;`), backticks (`` ` ``), or flags (`--flag`) are
+commands. Inputs starting with `./`, `../`, `/`, `~/`, `!`, or `#` are
+commands. Single-word unknown inputs fall through to shell execution
+(the safe default).
+
+### NLP signal detection
+
+Inputs ending with `?` or starting with interrogative words (how, what,
+why, when, where, who, which, whose, can, could, would, should, is,
+are, do, does, did, will, shall, may, might, please, tell, explain,
+describe) are classified as prompts.
+
+### NLP structure detection (has_nlp_structure)
+
+The remainder text (everything after the first word) is padded with
+spaces and matched against 70+ English function words using bash `case`
+word-boundary patterns:
+
+- Determiners: a, an, the, my, our, your, her, his, its, me, us, them, this, these, those, that, it
+- Prepositions: to, for, of, in, on, at, from, about, with, without
+- Conjunctions: and, or, but, if, not
+- Modals: should, could, would, might, will, must, can, does
+- Adverbs: just, also, only, very, really, please, maybe, perhaps, probably
+- Copula: is, are, was, were, have, has, had, been, being, be, am
+- Quantifiers: some, all, every, any
+- Question words: what, where, when, why, how
+- Similative: like
+
+A match on the strong NLP signals (a, the, my, our, your) in the
+padded arguments returns immediately as a prompt. Before doing so,
+the function checks for file extensions (`*.py`, `*.json`, etc.)
+in the arguments — if present, the input is more likely a command
+with file arguments and returns as a command.
+
+## opencode_with_context (lib/classifier.sh)
+
+Launches opencode in JSON-streaming mode with `--auto` so tool calls
+execute without interactive permission prompts. The stream is piped
+through `format_output.py` for terminal rendering.
+
+Session persistence:
+1. `read_project_session()` reads `.promptless-session` from the
+   current project root (found by `find_project_root()` walking up
+   from $PWD looking for `.git`, `package.json`, `Cargo.toml`, `go.mod`,
+   `composer.json`, or `Makefile`).
+2. If a session ID exists, opencode is invoked with `--session <id>`
+   to continue the existing conversation.
+3. `format_output.py` captures the session ID from the first JSON
+   event and writes it back to `.promptless-session`.
+
+## format_output.py — event parser
+
+Reads newline-delimited JSON from stdin and formats each event type:
+
+- `step_start`: silently skipped
+- `text`: `part.text` is unescaped and written to stdout in real-time
+- `tool_use`:
+  - completed: green checkmark, shell command shown, output printed
+  - error: red cross, error message and attempted command shown
+  - running: yellow spinner with command
+- `step_finish`: dimmed token stats (input/output counts) on stderr
+- Non-JSON lines (provider stderr): passed through verbatim
+
+Session ID is captured from the first event's `sessionID` field and
+written to the file path given as the first CLI argument.
+
+ANSI colour codes are applied only when stdout is a TTY.
+
+## Bash integration (shell/promptless.bash)
+
+Enter (`\C-m`) is bound to `\C-x\C-p\n`:
+
+- `bind -x '"\C-x\C-p": classify_and_route'`
+- `bind '"\C-m": "\C-x\C-p\n"'`
+
+`classify_and_route()` inspects `$READLINE_LINE`:
+- Escape hatches: `/new` and `/reset` call `reset_project_session()`
+- Commands: no-op, the trailing `\n` accepts the line for normal execution
+- Prompts: rewrites `READLINE_LINE` to `opencode_with_context <escaped>`,
+  sets `READLINE_POINT` to end, then `\n` accepts it
+
+The history entry is added manually via `history -s` before rewriting
+the line.
+
+## Zsh integration (shell/promptless.zsh)
+
+ZLE widget override:
+
+- `zle -N promptless_accept_line` replaces `accept-line`
+- `bindkey '^M' promptless_accept_line` and `bindkey '^J'` for Enter
+
+`promptless_accept_line()` inspects `$BUFFER`:
+- Escape hatches: `/new`/`/reset` reset session and show `zle -M` message
+- Commands: delegates to `zle .accept-line`
+- Prompts: `print -s "$user_input"` to history, clears `BUFFER`,
+  `zle -I` releases terminal, then calls `opencode_with_context` directly
+
+## Session management functions
+
+- `find_project_root()`: walks up from $PWD looking for version-control
+  or project markers. Falls back to current directory if none found.
+- `project_session_file()`: returns `$PROJECT_ROOT/.promptless-session`
+- `read_project_session()`: cats the session file if it exists
+- `write_project_session()`: writes a session ID to the file
+- `reset_project_session()`: deletes the session file
+
+## Testing
+
+`test/test_classifier.sh` runs 37 test cases:
+- 7 known command assertions (ls, git, cd, echo, export, source, scripts)
+- 20 natural-language prompt assertions (interrogative sentences, imperatives with function words)
+- 10 edge cases (empty input, escaped commands, pipes, redirects, flags,
+  single unknown words, bare nouns, "teach me" pattern)

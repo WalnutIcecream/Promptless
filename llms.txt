@@ -1,0 +1,50 @@
+# promptless — shell classifier for natural-language to opencode routing
+
+A dual-mode terminal: known commands execute natively via your shell
+(<10µs overhead), and natural-language prompts are routed to opencode
+with project-scoped session persistence across calls.
+
+## Architecture
+
+```
+Terminal input
+    │
+    ▼
+classify_and_route()
+    │
+    ├─ command → native shell execution
+    └─ prompt  → opencode run --format json --auto
+                    │
+                    ▼
+               format_output.py (JSON stream → terminal)
+                    │
+                    ▼
+               .promptless-session (per-project persistence)
+```
+
+## Core modules
+
+| Module | File | Purpose |
+|---|---|---|
+| Classifier | `lib/classifier.sh` | Word-boundary NLP heuristics, $PATH cache, session management |
+| Formatter | `lib/format_output.py` | JSON event parser: text, tool_use, errors, token stats → ANSI terminal |
+| Bash bridge | `shell/promptless.bash` | Readline macro chain (C-m → C-x C-p) intercepts Enter |
+| Zsh bridge | `shell/promptless.zsh` | ZLE widget override of accept-line |
+
+## Session persistence
+
+Project roots detected via `.git`, `package.json`, `Cargo.toml`, etc.
+Each gets its own `.promptless-session` file. Switching directories
+switches conversations. `/new` or `/reset` starts a fresh session.
+
+## Requirements
+
+- opencode in $PATH
+- Python >= 3.6
+- Bash >= 4.0 or Zsh >= 5.8
+
+## Entry points
+
+- `source shell/promptless.bash` — bash setup
+- `source shell/promptless.zsh`  — zsh setup
+- `bash test/test_classifier.sh` — 37 classifier tests

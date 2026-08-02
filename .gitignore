@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# promptless — per-user runtime state
+#
+# These files are regenerated on every use and differ between machines.
+# Committing them would leak per-user session data, cause constant diff
+# noise, and force contributors into each other's conversation context.
+# ---------------------------------------------------------------------------
+
+# opencode session persistence
+# ------------------------------
+# Created automatically in each project root to persist the current
+# opencode session ID so the next prompt resumes the same conversation.
+# Sessions are per-user, per-machine — committing this would let anyone
+# who clones the repo resume *your* session.
+.promptless-session
+.promptless-session.*
+
+# Editor and tool runtime directories
+# ------------------------------------
+# These directories contain per-user, per-machine session state,
+# preferences, caches, and conversation histories.  They are regenerated
+# on every use and should never be committed: they differ between
+# contributors, contain potentially sensitive session traces, and would
+# produce constant diff noise.
+.opencode/
+.commandcode/
+.claude/
