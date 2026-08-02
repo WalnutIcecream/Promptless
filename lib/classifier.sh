@@ -268,62 +268,53 @@ reset_project_session() {
 }
 
 
+# Resolve the path to the Python output formatter, searching relative to
+# this script first (development layout) then the installed location.
+_promptless_formatter_path() {
+    local here_dir
+    here_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+    local dev_path="${here_dir}/format_output.py"
+    local installed_path="${HOME}/.promptless/lib/format_output.py"
+
+    if [[ -x "$dev_path" ]]; then
+        echo "$dev_path"
+    elif [[ -x "$installed_path" ]]; then
+        echo "$installed_path"
+    else
+        echo ""
+    fi
+}
+
+
 # Launch opencode with the given prompt, continuing this project's session
 # if one exists, or starting a new one.
 #
-# Uses JSON-streaming mode so we can extract the session ID from the first
-# event.  Text content is printed to the terminal in real-time as it arrives.
+# Uses --auto so tool calls execute without blocking on interactive
+# permission prompts, which cannot work in the non-interactive shell-piped
+# mode.  Output is streamed through a Python formatter that handles every
+# opencode JSON event type: text, tool_use (completed/error/running), and
+# step boundaries — all surfaced in a readable terminal format.
 opencode_with_context() {
     local prompt="$1"
     local session_id
     session_id="$(read_project_session 2>/dev/null)" || true
 
+    local formatter
+    formatter="$(_promptless_formatter_path)"
+    if [[ -z "$formatter" ]]; then
+        echo "promptless: formatter not found (expected lib/format_output.py)" >&2
+        return 1
+    fi
+
+    local session_file
+    session_file="$(project_session_file 2>/dev/null)" || true
+
     if [[ -n "$session_id" ]]; then
-        opencode run --format json --session "$session_id" "$prompt" 2>/dev/null
+        opencode run --format json --auto --session "$session_id" "$prompt" 2>&1
     else
-        opencode run --format json "$prompt" 2>/dev/null
-    fi | _promptless_format_output
-}
-
-
-# Parse opencode's JSON-streaming output: capture the session ID from the
-# first event, store it for future prompts, then print text content to the
-# terminal as it arrives.
-_promptless_format_output() {
-    local session_captured=""
-    local line content
-
-    while IFS= read -r line; do
-        # Capture session ID from the first event (every event carries it).
-        if [[ -z "$session_captured" ]]; then
-            local extracted
-            extracted="$(echo "$line" | grep -o '"sessionID":"[^"]*"' | cut -d'"' -f4)"
-            if [[ -n "$extracted" ]]; then
-                write_project_session "$extracted" 2>/dev/null || true
-                session_captured="1"
-            fi
-        fi
-
-        # Print text content lines as they arrive.
-        # Each text event has "type":"text" at top level and the actual text
-        # content as "text":"<content>" inside the nested "part" object.
-        # We match from the *end* of the line to skip the top-level keys.
-        case "$line" in
-            *'"type":"text"'*)
-                # Remove everything up to the LAST "text":" occurrence.
-                local after_last="${line##*\"text\":\"}"
-                content="${after_last%%\"*}"
-                # Unescape common JSON escape sequences for clean terminal display.
-                content="${content//\\n/$'\n'}"
-                content="${content//\\t/	}"
-                content="${content//\\\"/\"}"
-                content="${content//\\\\/\\}"
-                printf "%s" "$content"
-                ;;
-        esac
-    done
-
-    echo ""
+        opencode run --format json --auto "$prompt" 2>&1
+    fi | "$formatter" "$session_file"
 }
 
 

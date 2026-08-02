@@ -10,7 +10,9 @@ echo "▸ Installing promptless to ${INSTALL_DIR}"
 
 mkdir -p "${INSTALL_DIR}/lib" "${INSTALL_DIR}/shell"
 
-cp "${SCRIPT_DIR}/lib/classifier.sh"   "${INSTALL_DIR}/lib/classifier.sh"
+cp "${SCRIPT_DIR}/lib/classifier.sh"     "${INSTALL_DIR}/lib/classifier.sh"
+cp "${SCRIPT_DIR}/lib/format_output.py" "${INSTALL_DIR}/lib/format_output.py"
+chmod +x "${INSTALL_DIR}/lib/format_output.py"
 cp "${SCRIPT_DIR}/shell/promptless.bash" "${INSTALL_DIR}/shell/promptless.bash"
 cp "${SCRIPT_DIR}/shell/promptless.zsh"  "${INSTALL_DIR}/shell/promptless.zsh"
 
