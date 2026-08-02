@@ -6,7 +6,7 @@
 
 ```bash
 # Install
-git clone https://github.com/you/promptless ~/.promptless && bash ~/.promptless/install.sh
+git clone https://github.com/WalnutIcecream/promptless ~/.promptless && bash ~/.promptless/install.sh
 
 # Then just type
 ls -la                    # → runs normally
