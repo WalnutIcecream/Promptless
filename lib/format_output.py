@@ -6,11 +6,12 @@ human consumption: text content streams through in real-time, tool
 calls are displayed with their inputs and results, and errors or
 denied permissions are surfaced prominently.
 
-The first optional argument is a file path where the session ID will
-be written for the shell wrapper to pick up.
+The session id seen in the first JSON event is written to the path given
+in the PROMPTLESS_CAPTURE_FILE environment variable (if set) so the shell
+wrapper can adopt a freshly created session as the current one.
 
 Usage:
-    opencode run --format json --auto "$PROMPT" 2>/dev/tty | format_output.py [session_file]
+    PROMPTLESS_CAPTURE_FILE=/tmp/out opencode run --format json --auto "$PROMPT" 2>/dev/tty | format_output.py
 """
 
 import json
@@ -67,7 +68,7 @@ def main():
     session_captured = False
     line_count = 0
 
-    session_file = sys.argv[1] if len(sys.argv) > 1 else None
+    capture_file = os.environ.get("PROMPTLESS_CAPTURE_FILE") or None
 
     for line_no, line in enumerate(sys.stdin, start=1):
         line = line.strip()
@@ -90,10 +91,10 @@ def main():
         # ---- session capture (first event) ----
         if not session_captured and session_id:
             session_captured = True
-            if session_file:
+            if capture_file:
                 try:
-                    with open(session_file, "w") as sf:
-                        sf.write(session_id)
+                    with open(capture_file, "w") as cf:
+                        cf.write(session_id)
                 except OSError:
                     pass
 

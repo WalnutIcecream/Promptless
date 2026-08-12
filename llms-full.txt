@@ -64,21 +64,50 @@ the function checks for file extensions (`*.py`, `*.json`, etc.)
 in the arguments — if present, the input is more likely a command
 with file arguments and returns as a command.
 
+## Slash commands
+
+Leading-slash input is handled by the shell bridges before
+classification ever runs:
+
+- `/session` (aliases `/sessions`, `/resume`, `/continue`): runs the
+  interactive picker (see below). Choosing a session sets it as the
+  current in-memory session; `n` starts fresh; `q` cancels.
+- `/new` (alias `/clear`): drops the current session so the next prompt
+  starts a brand-new conversation.
+
 ## opencode_with_context (lib/classifier.sh)
 
 Launches opencode in JSON-streaming mode with `--auto` so tool calls
 execute without interactive permission prompts. The stream is piped
 through `format_output.py` for terminal rendering.
 
-Session persistence:
-1. `read_project_session()` reads `.promptless-session` from the
-   current project root (found by `find_project_root()` walking up
-   from $PWD looking for `.git`, `package.json`, `Cargo.toml`, `go.mod`,
-   `composer.json`, or `Makefile`).
-2. If a session ID exists, opencode is invoked with `--session <id>`
-   to continue the existing conversation.
+Session handling is native-style — no per-project session file:
+
+1. If `PROMPTLESS_ACTIVE_SESSION` is set (picked via `/session`, or a
+   fresh session created earlier in this shell), opencode is invoked
+   with `--session <id>` to continue that conversation.
+2. Otherwise opencode starts a fresh session (the native default).
 3. `format_output.py` captures the session ID from the first JSON
-   event and writes it back to `.promptless-session`.
+   event into a temp file (path in `PROMPTLESS_CAPTURE_FILE`), which
+   `opencode_with_context` reads back and stores as the new
+   `PROMPTLESS_ACTIVE_SESSION`, so consecutive prompts continue the
+   same conversation. The variable is in-memory only — a new shell
+   starts clean.
+
+## lib/sessions.py — the /session picker
+
+- `list [--dir DIR]`: runs `opencode session list --format json`,
+  filters to the given directory (matching native TUI `/sessions`
+  scope), sorts newest-first, and prints `id<TAB>title<TAB>time`.
+- `pick [--dir DIR] [--active ID]`: renders a numbered list of
+  title + last-updated time, then reads a choice interactively.
+  Prints one token on stdout for the shell to act on:
+  `<session-id>`, `__PROMPTLESS_NEW__`, or `__PROMPTLESS_CANCEL__`.
+
+UI output goes to stderr so the shell can capture the result token on
+stdout. Input is read from stdin when it is a tty, otherwise from
+/dev/tty — needed because zsh zle widgets run with stdin as /dev/null.
+Tests can feed inline JSON via `--json` and pipe the choice on stdin.
 
 ## format_output.py — event parser
 
@@ -93,8 +122,9 @@ Reads newline-delimited JSON from stdin and formats each event type:
 - `step_finish`: dimmed token stats (input/output counts) on stderr
 - Non-JSON lines (provider stderr): passed through verbatim
 
-Session ID is captured from the first event's `sessionID` field and
-written to the file path given as the first CLI argument.
+The session ID is captured from the first event's `sessionID` field and
+written to the path in the `PROMPTLESS_CAPTURE_FILE` env var (if set),
+so a freshly created session becomes the shell's current session.
 
 ANSI colour codes are applied only when stdout is a TTY.
 
@@ -106,13 +136,15 @@ Enter (`\C-m`) is bound to `\C-x\C-p\n`:
 - `bind '"\C-m": "\C-x\C-p\n"'`
 
 `classify_and_route()` inspects `$READLINE_LINE`:
-- Escape hatches: `/new` and `/reset` call `reset_project_session()`
+- Slash commands: `/session`/`/sessions`/`/resume`/`/continue` run the
+  picker, `/new`/`/clear` drop the current session; the line is cleared
 - Commands: no-op, the trailing `\n` accepts the line for normal execution
 - Prompts: rewrites `READLINE_LINE` to `opencode_with_context <escaped>`,
   sets `READLINE_POINT` to end, then `\n` accepts it
 
 The history entry is added manually via `history -s` before rewriting
-the line.
+the line. The interactive picker temporarily switches the tty to cooked
+mode (readline leaves it raw during the callback) and restores it after.
 
 ## Zsh integration (shell/promptless.zsh)
 
@@ -122,19 +154,25 @@ ZLE widget override:
 - `bindkey '^M' promptless_accept_line` and `bindkey '^J'` for Enter
 
 `promptless_accept_line()` inspects `$BUFFER`:
-- Escape hatches: `/new`/`/reset` reset session and show `zle -M` message
+- Slash commands: `/session`/`/sessions`/`/resume`/`/continue` call
+  `zle -I` then run the interactive picker; `/new`/`/clear` drop the
+  current session
 - Commands: delegates to `zle .accept-line`
 - Prompts: `print -s "$user_input"` to history, clears `BUFFER`,
   `zle -I` releases terminal, then calls `opencode_with_context` directly
 
 ## Session management functions
 
-- `find_project_root()`: walks up from $PWD looking for version-control
-  or project markers. Falls back to current directory if none found.
-- `project_session_file()`: returns `$PROJECT_ROOT/.promptless-session`
-- `read_project_session()`: cats the session file if it exists
-- `write_project_session()`: writes a session ID to the file
-- `reset_project_session()`: deletes the session file
+- `PROMPTLESS_ACTIVE_SESSION`: in-memory current session id (empty means
+  fresh). Set by `/session`, cleared by `/new`, auto-adopted after a
+  fresh run. Never persisted to disk.
+- `_promptless_lib_file <name>`: resolves a lib/ file, preferring the
+  development layout over `~/.promptless/lib`.
+- `promptless_session_picker()`: runs `sessions.py pick`, applies the
+  result (continue / new / cancel) to `PROMPTLESS_ACTIVE_SESSION`.
+- `promptless_session_new()`: clears the current session.
+- `opencode_with_context()`: runs opencode against the current session
+  or fresh, formats output, and captures the new session id.
 
 ## Testing
 
@@ -143,3 +181,8 @@ ZLE widget override:
 - 20 natural-language prompt assertions (interrogative sentences, imperatives with function words)
 - 10 edge cases (empty input, escaped commands, pipes, redirects, flags,
   single unknown words, bare nouns, "teach me" pattern)
+
+`test/test_sessions.sh` runs 8 test cases against `lib/sessions.py`
+using inline `--json` data and piped choices: directory filtering,
+sort order, selection by number, retry on invalid input, and the new /
+cancel sentinels.

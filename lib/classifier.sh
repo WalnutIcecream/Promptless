@@ -1,14 +1,21 @@
 # promptless — dual-mode shell: commands run, prompts go to opencode
 #
 # Determines whether terminal input is a native shell command or a natural-language
-# prompt intended for opencode.  Also manages project-scoped opencode sessions so
-# each project directory gets its own conversation context.
+# prompt intended for opencode.  Sessions work the native opencode way: there is no
+# per-project session file and no automatic resume of the last session.  Prompts
+# default to a fresh session (which then becomes the in-memory "current" one); use
+# /session to pick a past session, /new to start fresh.
 
 declare -A COMMAND_CACHE 2>/dev/null
 CACHED_PATH=""
 
-# File stored per-project to remember the last opencode session ID.
-PROMPTLESS_SESSION_FILE=".promptless-session"
+# Directory containing this script's lib/ files, resolved at source time.
+# Works in both bash (BASH_SOURCE) and zsh ($0 is the sourced file at top level).
+if [[ -n "${BASH_VERSION:-}" ]]; then
+    PROMPTLESS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    PROMPTLESS_LIB_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
 
 
 # ---------------------------------------------------------------------------
@@ -205,81 +212,26 @@ has_nlp_structure() {
 
 
 # ---------------------------------------------------------------------------
-# Project-Scoped Session Management
+# Session Management (native opencode style)
 # ---------------------------------------------------------------------------
 
-# Find the project root by walking up from the current directory looking for
-# common version-control or project markers.  Falls back to the current
-# directory if none is found.
-find_project_root() {
-    local directory="$1"
-    directory="$(cd "$directory" 2>/dev/null && pwd)" || return 1
-
-    local marker
-    while [[ "$directory" != "/" ]]; do
-        for marker in .git .hg .bzr package.json Cargo.toml go.mod composer.json Makefile; do
-            if [[ -e "$directory/$marker" ]]; then
-                echo "$directory"
-                return 0
-            fi
-        done
-        directory="$(dirname "$directory")"
-    done
-
-    # No project marker found — fall back to current directory.
-    echo "$1"
-}
+# The current opencode session, tracked in-memory for this shell instance only.
+# Empty means "start a new session" (the native opencode default).  Set via
+# /session, cleared via /new, and adopted automatically after a fresh run so
+# consecutive prompts stay in the same conversation.
+PROMPTLESS_ACTIVE_SESSION=""
 
 
-# Get or create a session file path for the current project.
-project_session_file() {
-    local project_root
-    project_root="$(find_project_root "$(pwd)" 2>/dev/null)" || return 1
-    echo "${project_root}/${PROMPTLESS_SESSION_FILE}"
-}
+# Resolve a path to a file inside the lib/ directory, searching the development
+# layout first then the installed location.
+_promptless_lib_file() {
+    local name="$1"
+    local dev_path="${PROMPTLESS_LIB_DIR}/${name}"
+    local installed_path="${HOME}/.promptless/lib/${name}"
 
-
-# Read the stored session ID for this project, if any.
-read_project_session() {
-    local session_file
-    session_file="$(project_session_file 2>/dev/null)" || return 1
-    if [[ -f "$session_file" ]]; then
-        cat "$session_file"
-    fi
-}
-
-
-# Write a session ID to the project's session file.
-write_project_session() {
-    local session_id="$1"
-    local session_file
-    session_file="$(project_session_file 2>/dev/null)" || return 1
-    echo "$session_id" > "$session_file"
-}
-
-
-# Delete the project session file, forcing a fresh session next time.
-reset_project_session() {
-    local session_file
-    session_file="$(project_session_file 2>/dev/null)" || return 1
-    if [[ -f "$session_file" ]]; then
-        rm "$session_file"
-    fi
-}
-
-
-# Resolve the path to the Python output formatter, searching relative to
-# this script first (development layout) then the installed location.
-_promptless_formatter_path() {
-    local here_dir
-    here_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-
-    local dev_path="${here_dir}/format_output.py"
-    local installed_path="${HOME}/.promptless/lib/format_output.py"
-
-    if [[ -x "$dev_path" ]]; then
+    if [[ -f "$dev_path" ]]; then
         echo "$dev_path"
-    elif [[ -x "$installed_path" ]]; then
+    elif [[ -f "$installed_path" ]]; then
         echo "$installed_path"
     else
         echo ""
@@ -287,34 +239,101 @@ _promptless_formatter_path() {
 }
 
 
-# Launch opencode with the given prompt, continuing this project's session
-# if one exists, or starting a new one.
+# Interactive /session command: list this directory's sessions and let the user
+# pick one to continue, start a new one, or cancel.
+promptless_session_picker() {
+    local py
+    py="$(_promptless_lib_file "sessions.py")"
+    if [[ -z "$py" ]]; then
+        echo "promptless: sessions.py not found (expected lib/sessions.py)" >&2
+        return 1
+    fi
+
+    # The picker reads interactively, but the tty is in raw mode inside readline
+    # and zle callbacks — switch to cooked mode so input() behaves normally.
+    local saved_stty=""
+    if [[ -t 0 ]]; then
+        saved_stty="$(stty -g 2>/dev/null)" || saved_stty=""
+        stty sane 2>/dev/null
+    fi
+
+    # Run with stdout redirected to a temp file rather than $(...): zsh's command
+    # substitution feeds the child /dev/null, which would EOF the interactive read.
+    local result_file
+    result_file="$(mktemp "${TMPDIR:-/tmp}/promptless.XXXXXX" 2>/dev/null)" || result_file=""
+    local result=""
+    if [[ -n "$result_file" ]]; then
+        python3 "$py" pick --dir "$(pwd)" --active "$PROMPTLESS_ACTIVE_SESSION" > "$result_file"
+        result="$(cat "$result_file" 2>/dev/null)"
+        rm -f "$result_file"
+    fi
+
+    if [[ -n "$saved_stty" ]]; then
+        stty "$saved_stty" 2>/dev/null
+    fi
+
+    case "$result" in
+        __PROMPTLESS_NEW__)
+            PROMPTLESS_ACTIVE_SESSION=""
+            echo "promptless: new session — next prompt starts fresh"
+            ;;
+        __PROMPTLESS_CANCEL__|"")
+            echo "promptless: canceled"
+            ;;
+        *)
+            PROMPTLESS_ACTIVE_SESSION="$result"
+            echo "promptless: now using session ${result}"
+            ;;
+    esac
+}
+
+
+# /new: drop the current session so the next prompt starts a fresh one.
+promptless_session_new() {
+    PROMPTLESS_ACTIVE_SESSION=""
+    echo "promptless: new session — next prompt starts fresh"
+}
+
+
+# Launch opencode with the given prompt.  If a session was selected via /session
+# (or was created by an earlier prompt in this shell), it is continued with
+# --session; otherwise opencode starts a fresh session, whose id the formatter
+# captures so it becomes the new in-memory current session.
 #
-# Uses --auto so tool calls execute without blocking on interactive
-# permission prompts, which cannot work in the non-interactive shell-piped
-# mode.  Output is streamed through a Python formatter that handles every
-# opencode JSON event type: text, tool_use (completed/error/running), and
-# step boundaries — all surfaced in a readable terminal format.
+# Uses --auto so tool calls execute without blocking on interactive permission
+# prompts, which cannot work in the non-interactive shell-piped mode.  Output is
+# streamed through a Python formatter that handles every opencode JSON event
+# type: text, tool_use (completed/error/running), and step boundaries.
 opencode_with_context() {
     local prompt="$1"
-    local session_id
-    session_id="$(read_project_session 2>/dev/null)" || true
 
     local formatter
-    formatter="$(_promptless_formatter_path)"
+    formatter="$(_promptless_lib_file "format_output.py")"
     if [[ -z "$formatter" ]]; then
         echo "promptless: formatter not found (expected lib/format_output.py)" >&2
         return 1
     fi
 
-    local session_file
-    session_file="$(project_session_file 2>/dev/null)" || true
+    local capture_file
+    capture_file="$(mktemp "${TMPDIR:-/tmp}/promptless.XXXXXX" 2>/dev/null)" || capture_file=""
+    [[ -n "$capture_file" ]] && rm -f "$capture_file"
 
-    if [[ -n "$session_id" ]]; then
-        opencode run --format json --auto --session "$session_id" "$prompt" 2>&1
+    export PROMPTLESS_CAPTURE_FILE="$capture_file"
+    if [[ -n "$PROMPTLESS_ACTIVE_SESSION" ]]; then
+        opencode run --format json --auto --session "$PROMPTLESS_ACTIVE_SESSION" "$prompt" 2>&1
     else
         opencode run --format json --auto "$prompt" 2>&1
-    fi | "$formatter" "$session_file"
+    fi | "$formatter"
+    unset PROMPTLESS_CAPTURE_FILE
+
+    if [[ -n "$capture_file" && -f "$capture_file" ]]; then
+        local new_session
+        new_session="$(cat "$capture_file")"
+        if [[ -n "$new_session" ]]; then
+            PROMPTLESS_ACTIVE_SESSION="$new_session"
+        fi
+        rm -f "$capture_file"
+    fi
 }
 
 

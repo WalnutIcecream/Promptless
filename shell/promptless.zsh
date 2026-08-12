@@ -18,15 +18,22 @@ fi
 promptless_accept_line() {
     local user_input="${BUFFER}"
 
-    # Escape hatches — handled before classification so they never reach
-    # a "command not found" error.  A leading slash is the only safe prefix
-    # that won't collide with real commands (they start with /path syntax
-    # which is already captured by the classifier).
+    # Slash commands — handled before classification so they never reach a
+    # "command not found" error.  /session lists this directory's sessions and
+    # picks one to continue; /new drops the current session.  A leading slash
+    # is the only safe prefix that won't collide with real commands (they start
+    # with /path syntax which is already captured by the classifier).
     case "$user_input" in
-        /new|/reset)
-            reset_project_session
+        /session|/sessions|/resume|/continue)
             BUFFER=""
-            zle -M "Session reset — next prompt will start a fresh conversation."
+            zle -I
+            promptless_session_picker
+            return
+            ;;
+        /new|/clear)
+            BUFFER=""
+            zle -I
+            promptless_session_new
             return
             ;;
     esac

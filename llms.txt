@@ -2,7 +2,8 @@
 
 A dual-mode terminal: known commands execute natively via your shell
 (<10µs overhead), and natural-language prompts are routed to opencode
-with project-scoped session persistence across calls.
+with native-style session management (no per-project session files,
+no auto-resume).
 
 ## Architecture
 
@@ -14,12 +15,12 @@ classify_and_route()
     │
     ├─ command → native shell execution
     └─ prompt  → opencode run --format json --auto
-                    │
+                    │            (fresh, or --session <current>)
                     ▼
                format_output.py (JSON stream → terminal)
                     │
                     ▼
-               .promptless-session (per-project persistence)
+               current session id captured in memory
 ```
 
 ## Core modules
@@ -27,15 +28,19 @@ classify_and_route()
 | Module | File | Purpose |
 |---|---|---|
 | Classifier | `lib/classifier.sh` | Word-boundary NLP heuristics, $PATH cache, session management |
+| Session picker | `lib/sessions.py` | `/session` list + interactive picker (current-directory scope) |
 | Formatter | `lib/format_output.py` | JSON event parser: text, tool_use, errors, token stats → ANSI terminal |
 | Bash bridge | `shell/promptless.bash` | Readline macro chain (C-m → C-x C-p) intercepts Enter |
 | Zsh bridge | `shell/promptless.zsh` | ZLE widget override of accept-line |
 
-## Session persistence
+## Session management
 
-Project roots detected via `.git`, `package.json`, `Cargo.toml`, etc.
-Each gets its own `.promptless-session` file. Switching directories
-switches conversations. `/new` or `/reset` starts a fresh session.
+Sessions mirror native opencode: the current session is tracked in
+memory for the shell instance only (no `.promptless-session` file).
+`/session` lists this directory's sessions and picks one to continue,
+`/new` drops the current session so the next prompt starts fresh.
+Consecutive prompts continue the current conversation; nothing survives
+a shell restart.
 
 ## Requirements
 
@@ -48,3 +53,4 @@ switches conversations. `/new` or `/reset` starts a fresh session.
 - `source shell/promptless.bash` — bash setup
 - `source shell/promptless.zsh`  — zsh setup
 - `bash test/test_classifier.sh` — 37 classifier tests
+- `bash test/test_sessions.sh`   — session picker tests

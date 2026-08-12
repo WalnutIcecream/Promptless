@@ -18,13 +18,20 @@ fi
 classify_and_route() {
     local user_input="$READLINE_LINE"
 
-    # Escape hatches.
+    # Slash commands — handled before classification so they never reach a
+    # "command not found" error.  /session lists this directory's sessions and
+    # picks one to continue; /new drops the current session.
     case "$user_input" in
-        /new|/reset)
-            reset_project_session
+        /session|/sessions|/resume|/continue)
+            promptless_session_picker
             READLINE_LINE=""
-            echo ""
-            echo "✅ Session reset — next prompt will start a fresh conversation."
+            READLINE_POINT=0
+            return 0
+            ;;
+        /new|/clear)
+            promptless_session_new
+            READLINE_LINE=""
+            READLINE_POINT=0
             return 0
             ;;
     esac

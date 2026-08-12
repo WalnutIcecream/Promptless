@@ -2,7 +2,7 @@
 
 > Your terminal shouldn't need an IDE wrapper to understand English.
 
-**promptless** is a shell classifier that sits on your Enter key. Known commands pass through in <10µs. Everything else — "find all the dead CSS", "explain that error", "deploy the latest tag" — goes straight to opencode with project-scoped conversation persistence and a readable terminal formatter for every opencode event type. Zero non-system dependencies. A shell script and a Python snippet.
+**promptless** is a shell classifier that sits on your Enter key. Known commands pass through in <10µs. Everything else — "find all the dead CSS", "explain that error", "deploy the latest tag" — goes straight to opencode with native-style session management and a readable terminal formatter for every opencode event type. Zero non-system dependencies. A shell script and a Python snippet.
 
 ```bash
 # Install
@@ -10,7 +10,8 @@ git clone https://github.com/WalnutIcecream/promptless ~/.promptless && bash ~/.
 
 # Then just type
 ls -la                    # → runs normally
-check if the server is running  # → opencode run --continue "check if..."
+check if the server is running  # → opencode run --auto "check if..."
+/session                  # → list this directory's sessions, pick one
 /new                      # → fresh session
 ```
 
@@ -33,15 +34,15 @@ Your Enter key
     │              │
     ▼              ▼
   shell        opencode run --format json --auto
-  executes        │
+  executes        │    (fresh, or --session <current>)
   normally        ▼
             format_output.py
             (text, tool_use,
              errors, token usage)
                 │
                 ▼
-            + session persisted
-              to .promptless-session
+            current session id
+            captured in memory
 ```
 
 ## Project layout
@@ -49,14 +50,16 @@ Your Enter key
 ```
 promptless/
 ├── lib/
-│   ├── classifier.sh     # 326 lines — core: cache, heuristics, session mgmt
-│   └── format_output.py  # 175 lines — JSON event parser for terminal output
+│   ├── classifier.sh     # core: cache, heuristics, session mgmt
+│   ├── sessions.py       # /session list + interactive picker
+│   └── format_output.py  # JSON event parser for terminal output
 ├── shell/
-│   ├── promptless.bash    # 47 lines — readline macro chain for bash
-│   └── promptless.zsh     # 55 lines — zle widget override for zsh
+│   ├── promptless.bash    # readline macro chain for bash
+│   └── promptless.zsh     # zle widget override for zsh
 ├── install.sh             # copies files, appends source line to .bashrc/.zshrc
 ├── test/
-│   └── test_classifier.sh # 37 test cases, all passing
+│   ├── test_classifier.sh # 37 classifier tests
+│   └── test_sessions.sh   # session picker tests
 └── README.md
 ```
 
@@ -71,7 +74,7 @@ Three functions, one decision:
 | `is_shell_command()` | Main decision pipeline — returns 0 (command) or 1 (prompt) | ~1-200µs |
 | `has_nlp_structure()` | Word-boundary matching against 70+ English function words | ~50µs |
 | `is_ambiguous_verb()` | ~200 words like "find", "build", "test" that exist as both commands and English verbs | ~10µs |
-| `opencode_with_context()` | Launches opencode with `--auto`, pipes JSON stream to `format_output.py`, writes session to `.promptless-session` | varies |
+| `opencode_with_context()` | Launches opencode with `--auto`, pipes JSON stream to `format_output.py`, captures the session id | varies |
 
 The hot path is a single associative-array lookup (`COMMAND_CACHE["$first_word"]`). This is the same data structure `compgen -c` builds, pre-populated at shell startup. Only when a word is not found *or* is in the ambiguous-verb list do we fall through to the NLP heuristics.
 
@@ -89,9 +92,13 @@ Reads newline-delimited JSON events from opencode's `--format json --auto` strea
 | `tool_use` (running) | Yellow spinner with the running command |
 | `step_finish` | Dimmed token usage per step (↑input ↓output) |
 
-Non-JSON lines (stderr from opencode or providers) pass through verbatim. The formatter also captures the session ID from the first event and writes it to `.promptless-session` so the shell wrapper doesn't need to parse JSON itself.
+Non-JSON lines (stderr from opencode or providers) pass through verbatim. The formatter also captures the session ID from the first event and exposes it to the shell wrapper so a freshly created session becomes the in-memory current one.
 
 The `--auto` flag is required because `opencode run` in non-interactive mode silently denies all tool calls without it. With `--auto`, tools execute and their results are visible in the formatted output — no silent failures, no hidden permission prompts.
+
+### `lib/sessions.py` — the /session picker
+
+Backs the `/session` slash command. Runs `opencode session list --format json`, filters to the current directory (matching the native TUI `/sessions` behavior), and renders a numbered list of title + last-updated time. You pick a number to continue that session, `n` to start a new one, or `q` to cancel. The shell then records your choice as the current session.
 
 ### `shell/promptless.bash` — the bash bridge
 
@@ -110,27 +117,38 @@ Cleaner approach via zle widget override. Wraps `accept-line`:
 
 - Command → delegates to `.accept-line` (the original)
 - Prompt → `print -s` to history, `zle -I` to release terminal, `opencode_with_context` directly
-- `/new`/`/reset` → `reset_project_session`, shows `zle -M` status message
+- `/session` → releases the terminal and runs the interactive picker
+- `/new` → drops the current session, next prompt starts fresh
 
 No macro chaining fragility — zsh's widget system handles this natively.
 
-### Session persistence
+### Session management
 
-Each project root (detected by `.git`, `package.json`, `Cargo.toml`, etc.) gets its own `.promptless-session` file containing the opencode session ID. Switching directories switches conversations automatically.
+Sessions work the way native opencode does. There is **no per-project session file and no automatic resume** of your last conversation.
+
+- The current session lives **in memory for this shell instance only**. Each new shell starts with no current session — a fresh shell's first prompt starts a brand-new opencode session.
+- `/session` lists this directory's past sessions (title + last updated). Pick one to continue it, `n` to start fresh, `q` to cancel.
+- `/new` drops the current session so your next prompt starts a fresh one.
+- Consecutive prompts in the same shell continue the current conversation, exactly like typing in the opencode TUI — and nothing survives a shell restart.
 
 ```bash
-cd ~/project-a
-# prompt → continues project-a's conversation
-cd ~/project-b
-# prompt → continues project-b's conversation
+$ /session
+promptless sessions · /home/walnut/project-a
+------------------------------------------------------------
+    1) Fix the auth bug                              3:12 PM
+    2) Add dark mode                                11:02 AM · 7/28
+    n) New session
+Select a session (1-2, n=new, q=cancel): 1
+promptless: now using session ses_1ab2cd...
+# prompt → continues that conversation
 /new
-# prompt → starts fresh in project-b
+# prompt → starts fresh
 ```
 
 ## Requirements
 
 - **opencode** in `$PATH` (the only runtime dependency)
-- **Python ≥ 3.6** (for `format_output.py` — standard on all modern systems)
+- **Python ≥ 3.6** (for `format_output.py` and `sessions.py` — standard on all modern systems)
 - **Bash ≥ 4.0** or **Zsh ≥ 5.8** (for associative array support)
 - `compgen` available (built into bash; zsh sources via `compgen -abk`)
 
@@ -145,16 +163,10 @@ find|make|test|echo|...
 find|make|test|echo|your-verb|...
 ```
 
-To change session markers, edit the `marker` list in `find_project_root()`:
-
-```bash
-for marker in .git .hg .bzr package.json Cargo.toml go.mod ...
-```
-
 To test:
 
 ```bash
-bash test/test_classifier.sh
+bash test/test_classifier.sh && bash test/test_sessions.sh
 ```
 
 To customise the output format (colours, tool display, token visibility), edit `lib/format_output.py`. The ANSI colour constants are at the top of `main()` and the event handlers are in the `if/elif` chain.
